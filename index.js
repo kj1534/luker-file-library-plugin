@@ -5,6 +5,7 @@ import { showLibrary } from './library-ui.js';
 const API = '/api/plugins/gcs-video';
 let config;
 let pending = null;
+let chatRevision = 0;
 const context = () => globalThis.Luker.getContext();
 const durationLabel = value => value > 0 ? `${Math.round(value)} 秒` : '时长未知';
 
@@ -28,7 +29,7 @@ async function showVideoManager() {
         return showVideoManager();
     }
     config=await response.json();
-    return showLibrary({API,context,Popup,POPUP_TYPE,POPUP_RESULT,queueVideo,getPending:()=>pending,onAttachLink:()=>showAttachDialog().catch(error=>toastr.error(error.message)),onConnect:()=>connectLibrary().catch(error=>toastr.error(error.message))});
+    return showLibrary({API,context,Popup,POPUP_TYPE,POPUP_RESULT,queueVideo,getPending:()=>pending,getAttachmentScope:()=>chatRevision,onAttachLink:()=>showAttachDialog().catch(error=>toastr.error(error.message)),onConnect:()=>connectLibrary().catch(error=>toastr.error(error.message))});
 }
 
 const paperclipSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:5px;flex-shrink:0;"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.96 8.8l-8.58 8.57a2 2 0 0 1-2.83-2.83l7.87-7.87"/></svg>';
@@ -178,6 +179,7 @@ jQuery(async () => {
             ctx.eventSource.on(event, renderMessage);
         }
         ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED, () => {
+            chatRevision++;
             pending = null;
             renderPending();
             context().chat.forEach((_, index) => renderMessage(index));

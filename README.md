@@ -2,6 +2,10 @@
 
 Public frontend extension and server plugin for Luker. This repository contains only the connector UI and the turn-scoped Gemini adapter. It does not deploy a file-library service, downloader, Copyparty, GCS credentials, proxy nodes or personalized server configuration.
 
+## Interaction updates (1.1.8)
+
+The chat library opens in a movable, collapsible window while chat remains interactive. Uploads and link imports share Add files. Task controls retain focus during refresh and support node filters, sorting and pagination. Collapse keeps uploads running; closing the browser before its file transfer finishes still requires selecting the original file to resume.
+
 ## Install and update
 
 Install `https://github.com/kj1534/luker-file-library-plugin` in both Luker's official frontend-extension and server-plugin installers. Enable server plugins and restart the host when prompted. Both components must use the same release; frontend automatic updates are enabled in `manifest.json`, and the server component can be updated through the host's plugin update control.
