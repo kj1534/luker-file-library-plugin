@@ -620,6 +620,11 @@
   .gcs-video-manager .gcs-task-actions { grid-column:2; justify-content:flex-start; max-width:none; }
 }
 .gcs-task-progress { display:block; margin-top:6px; max-width:600px; }
+.gcs-task-source { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:6px 0; font-size:.8rem; }
+.gcs-task-source a { min-width:0; overflow-wrap:anywhere; color:var(--gcs-primary,#059669); }
+.gcs-task-source small { flex-basis:100%; color:#64748b; }
+.gcs-store-progress { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:.8rem; margin-top:6px; }
+.gcs-store-progress progress { flex:1; min-width:80px; max-width:300px; }
 .gcs-task-progress:indeterminate,
 .gcs-task-progress:indeterminate::-webkit-progress-bar {
   background:linear-gradient(90deg,#e2e8f0 20%,#10b981 50%,#e2e8f0 80%);

@@ -18,7 +18,7 @@ Existing installations from the old combined repository must switch both install
 
 ## Features
 
-- Browse, search, sort, preview and select files; upload resumably; submit remote imports and follow live tasks.
+- Browse, search, sort, preview and select files; upload resumably; submit one or many remote imports without waiting for existing downloads. Inspect failed source links, choose another import node when supported, and follow separate Copyparty/GCS transfer progress.
 - File bytes are handled by the configured independent service and its storage nodes, not routed through the chat host.
 - Attach supported video, audio, image, PDF and text to only the current Gemini turn; regeneration preserves that turn's attachment.
 - Accounts and permission decisions come from the private service. The plugin does not expose storage/node administrator credentials.

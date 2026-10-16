@@ -5,6 +5,13 @@ export const taskStatusLabels={queued:'排队中',resolving:'解析中',connecti
     receiving:'接收上传',ready:'等待上传',running:'上传 GCS 中',publishing:'保存至文件库',retrying:'断线重试中',pausing:'正在暂停',paused:'已暂停',
     complete:'已完成',failed:'失败',cancelled:'已取消',expired:'已过期',disconnected:'节点暂不可用'};
 
+export function importSources(value) {
+    const lines=[...new Set(String(value).split(/\r?\n/).map(line=>line.trim()).filter(Boolean))];
+    if(!lines.length||lines.length>100)throw Error('请输入 1–100 个 HTTPS 链接，每行一个。');
+    for(const source of lines){let url;try{url=new URL(source);}catch{throw Error('存在无效链接，请检查后提交。');}if(url.protocol!=='https:'||url.username||url.password)throw Error('仅支持不包含账号密码的 HTTPS 链接。');}
+    return lines;
+}
+
 export function taskPresentation(task,now=Date.now()) {
     const done=Math.max(0,Number(task.done)||0),total=Math.max(0,Number(task.total)||0);
     const active=['downloading','running','receiving'].includes(task.status);
@@ -81,13 +88,13 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     const pause = $('<button type="button" class="menu_button">').text('暂停传输').prop('disabled', true);
     const fresh = $('<button type="button" class="menu_button gcs-subtle">').text('重置上传进度');
     const list = $('<div class="gcs-video-list" aria-label="文件列表">');
-    const importUrl = $('<input class="text_pole" placeholder="输入或粘贴媒体链接（支持 B站 / YouTube / Iwara / 外部直接下载链接）">');
+    const importUrl = $('<textarea rows="3" class="text_pole" aria-label="导入链接" placeholder="粘贴媒体链接，每行一个（支持 B站 / YouTube / Iwara / 文件直链）">');
     const importWorker = $('<select class="text_pole" aria-label="负责解析下载的节点">');
     for (const worker of config.import_workers) importWorker.append($('<option>').val(worker.id).text(worker.label+(worker.online===false?' · 离线':worker.sites?' · '+worker.sites.join('/') : '')));
     importWorker.val(config.default_import_worker);
     const syncCopyparty = $('<input type="checkbox">').prop('checked',config.admin);
     const syncLabel = $('<label class="gcs-checkbox">').append(syncCopyparty, ' 同时保存一份至节点文件库（通常保留约 7 天，便于节点直连播放）').toggle(config.admin);
-    const importButton = $('<button type="button" class="menu_button gcs-primary">').text('开始后台解析与导入');
+    const importButton = $('<button type="button" class="menu_button gcs-primary">').text('加入后台任务队列');
     const importStatus = $('<div role="status" class="gcs-import-status">');
     let polling = true;
     const more = $('<button type="button" class="menu_button">').text('加载更多').hide();
@@ -428,7 +435,6 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     const importKey = `gcs-video-import:${config.user}`;
     async function pollImport(id, taskStatus = importStatus) {
         let failures = 0;
-        importButton.prop('disabled', true);
         try {
             while (polling) {
                 let response;
@@ -449,19 +455,23 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
         } catch (error) { taskStatus.text(error.message); }
-        finally { importButton.prop('disabled', false); }
     }
     importButton.on('click', async () => {
         importButton.prop('disabled', true);
         importStatus.text('正在检查链接并创建导入任务…');
         try {
-            const response = await fetch(`${API}/imports`, { method: 'POST', headers: context().getRequestHeaders(), body: JSON.stringify({ source_url: importUrl.val(), worker_id: importWorker.val(), sync_copyparty: syncCopyparty.prop('checked') }) });
-            const job = await response.json();
-            if (!response.ok) throw new Error(job.error || '导入失败。');
-            sessionStorage.setItem(importKey, job.id);
-            importUrl.val('');
-            await pollImport(job.id);
-        } catch (error) { importStatus.text(error.message); importButton.prop('disabled', false); }
+            const sources=importSources(importUrl.val()),failed=[];let submitted=0;
+            const worker_id=importWorker.val(),sync_copyparty=syncCopyparty.prop('checked');
+            for(const source_url of sources){
+                try {await api('/imports',{source_url,worker_id,sync_copyparty});submitted++;}
+                catch(error){failed.push({source_url,error:error.message});}
+            }
+            importUrl.val(failed.map(item=>item.source_url).join('\n'));
+            importStatus.empty().append($('<p>').text(`已提交 ${submitted} 个任务${failed.length?'，'+failed.length+' 个未提交，链接保留在输入框':''}；可继续提交其他链接。`),
+                $('<button type="button" class="menu_button">').text('查看后台任务与进度').on('click',()=>selectTab('tasks')));
+            if(failed.length)importStatus.append($('<p class="gcs-muted">').text(failed[0].error));
+        } catch (error) { importStatus.text(error.message); }
+        finally {importButton.prop('disabled',!config.import_workers.length);}
     });
     const tabs = $('<div class="gcs-tabs" role="tablist" aria-label="文件库功能">');
     const pages = new Map();
@@ -529,15 +539,15 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     const taskSummary=$('<div class="gcs-muted">'),taskSync=$('<div role="status" class="gcs-muted">').text('正在读取任务…');
     const taskFilter=$('<select class="text_pole" aria-label="筛选任务状态">');
     for(const [value,label] of [['all','全部任务'],['active','进行中'],['queued','排队中'],['paused','已暂停'],['complete','已完成'],['failed','失败 / 取消']])taskFilter.append($('<option>').val(value).text(label));
-    const taskSearch=$('<input type="search" class="text_pole" placeholder="搜索任务文件名" aria-label="搜索任务">');
+    const taskSearch=$('<input type="search" class="text_pole" placeholder="搜索文件名或来源链接" aria-label="搜索任务">');
     const taskCards=$('<div class="gcs-task-cards">');
     const taskSelection=new Set();let taskItems=[],bulkBusy=false;
     const terminal=task=>['complete','failed','cancelled','expired'].includes(task.status);
-    const eligible=(task,op)=>op==='pause'?task.can_pause:op==='resume'?task.can_resume:op==='retry'?['failed','cancelled','expired'].includes(task.status):op==='cancel'?!terminal(task):true;
+    const eligible=(task,op)=>op==='pause'?task.can_pause:op==='resume'?task.can_resume:op==='retry'?task.can_retry!==false&&['failed','cancelled','expired'].includes(task.status):op==='cancel'?!terminal(task):true;
     function visibleTasks(){return taskItems.filter(task=>{
         const filter=taskFilter.val();
         const match=filter==='all'||filter==='active'&&(!terminal(task)&&!['paused','queued'].includes(task.status))||filter==='failed'&&['failed','cancelled','expired'].includes(task.status)||filter===task.status;
-        return match&&(task.video?.title||task.title||task.id).toLowerCase().includes(String(taskSearch.val()).toLowerCase());
+        return match&&`${task.video?.title||task.title||task.id} ${task.source_url||''}`.toLowerCase().includes(String(taskSearch.val()).toLowerCase());
     });}
     const selectionLabel=$('<span class="gcs-muted">');
     const selectTasks=$('<input type="checkbox" aria-label="选择当前显示的全部任务">').on('change',function(){for(const task of visibleTasks())this.checked?taskSelection.add(task.id):taskSelection.delete(task.id);renderTasks();});
@@ -548,18 +558,18 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
         selectTasks.prop('indeterminate',visible.some(task=>taskSelection.has(task.id))&&!visible.every(task=>taskSelection.has(task.id)));
         taskTools.find('[data-task-operation]').each(function(){const operation=this.dataset.taskOperation;$(this).prop('disabled',bulkBusy||!(operation==='clean'?taskItems.filter(terminal):selected.filter(task=>eligible(task,operation))).length);});
     }
-    async function operateTasks(operation,items){
+    async function operateTasks(operation,items,options={}){
         if(bulkBusy)return;
         const targets=items.filter(task=>eligible(task,operation));
         if(!targets.length){toastr.warning('所选任务当前没有可执行此操作的项目。');return;}
         if(['delete','cancel'].includes(operation)&&!await confirmOperation(operation==='delete'?'删除任务':'取消任务',`对 ${targets.length} 个任务执行${operation==='delete'?'取消并删除记录':'取消'}？已保存的视频文件不会被删除。`))return;
-        bulkBusy=true;taskTools.find('button').prop('disabled',true);let failures=0;
+        bulkBusy=true;taskTools.find('button').prop('disabled',true);let failures=0,lastError='';
         try {
             for(const task of targets){
-                try{await api('/tasks/'+encodeURIComponent(task.id)+'/'+operation,{});if(operation==='delete')taskSelection.delete(task.id);}
-                catch{failures++;}
+                try{await api('/tasks/'+encodeURIComponent(task.id)+'/'+operation,options);if(operation==='delete')taskSelection.delete(task.id);}
+                catch(error){failures++;lastError=error.message;}
             }
-            if(failures)toastr.error(`${failures} 项操作未成功；保留记录，请检查状态后重试。`);
+            if(failures)toastr.error(`${failures} 项操作未成功：${lastError}`);
             else toastr.success(`已处理 ${targets.length} 项。`);
             await taskRefresher.refresh();
         } finally{bulkBusy=false;updateSelection();}
@@ -569,6 +579,15 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     taskTools.append($('<button type="button" class="menu_button">').attr('data-task-operation','clean').text('清理已结束').on('click',()=>operateTasks('delete',taskItems.filter(terminal))));
     tasks.append(taskSummary,$('<div class="gcs-task-filters">').append(taskFilter,taskSearch,$('<button type="button" class="menu_button">').text('立即同步').on('click',()=>taskRefresher.refresh())),taskSync,taskTools,taskCards);
     taskFilter.on('change',renderTasks);taskSearch.on('input',renderTasks);
+    async function chooseRetryWorker(task){
+        const choice=$('<select class="text_pole" aria-label="重试处理节点">');
+        for(const node of config.import_workers)choice.append($('<option>').val(node.id).text(node.label+(node.online===false?' · 当前离线':'')));
+        choice.val(task.worker_id);
+        const body=$('<div>').append($('<h3>').text('选择节点重新解析与下载'),$('<p>').text(task.source_url||task.title||task.id),choice,
+            $('<p class="gcs-muted">').text('创建新的重试任务，原失败记录保留。解析与下载都由所选节点执行；目标存储策略不变。'));
+        if(await new Popup(body,POPUP_TYPE.CONFIRM,'',{okButton:'创建重试任务',cancelButton:'取消'}).show()===POPUP_RESULT.AFFIRMATIVE)
+            await operateTasks('retry',[task],{worker_id:choice.val()});
+    }
     function renderTasks(){
         taskCards.empty();
         const counts={queued:0,paused:0,complete:0,active:0,failed:0};
@@ -593,9 +612,23 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
                     task.resume_note ? $('<span>').text(task.resume_note) : $('')
                 )
             );
+            if(task.source_url){
+                const copy=$('<button type="button" class="menu_button gcs-subtle">').text('复制链接').on('click',()=>copyUrl(task.source_url,copy));
+                mainInfo.append($('<div class="gcs-task-source">').append($('<span>').text('来源：'),
+                    $('<a target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">').attr('href',task.source_url).text(task.source_url),copy,
+                    task.source_redacted?$('<small>').text('已隐藏签名参数；重试仍用服务端保存的完整链接。'):$('')));
+            } else if(isFailed)mainInfo.append($('<p class="gcs-muted">').text('旧任务来源尚不可恢复；可尝试原节点重试，或重新提交链接。'));
+            if(task.warning)mainInfo.append($('<p class="gcs-muted">').text(task.warning));
+            for(const [store,transfer] of Object.entries(task.transfers||{})){
+                const phases={queued:'等待开始',hashing:'计算分块校验',uploading:'写入中',indexing:'登记索引',complete:'完成',failed:'失败',cancelled:'已取消'};
+                const line=$('<div class="gcs-store-progress">').append($('<span>').text(`${store==='gcs'?'GCS':'Copyparty'}：${phases[transfer.phase]||transfer.phase}`));
+                if(transfer.total){line.append($('<span>').text(`${(transfer.done/1048576).toFixed(1)} / ${(transfer.total/1048576).toFixed(1)} MiB`),$('<progress>').attr({max:transfer.total,'aria-label':store+'进度'}).val(transfer.done));}
+                if(transfer.speed&&transfer.phase==='uploading'&&Date.now()-transfer.progress_at*1000<10000)line.append($('<span>').text(`${(transfer.speed/1048576).toFixed(1)} MiB/s`));
+                mainInfo.append(line);
+            }
             taskProgress(mainInfo,task);
             const actions=$('<div class="gcs-actions gcs-task-actions">');
-            const ops=isFailed?['retry']:isDone?[]:[...(task.can_pause?['pause']:[]),...(task.can_resume?['resume']:[]),'cancel'];
+            const ops=isFailed?(task.can_retry===false?[]:['retry']):isDone?[]:[...(task.can_pause?['pause']:[]),...(task.can_resume?['resume']:[]),'cancel'];
             for(const op of ops){
                 const btn=$('<button type="button" class="menu_button">')
                     .toggleClass('danger', op==='cancel')
@@ -604,6 +637,7 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
                     .on('click',()=>operateTasks(op,[task]));
                 actions.append(btn);
             }
+            if(isFailed&&task.can_change_worker)actions.append($('<button type="button" class="menu_button">').text('换节点重试').on('click',()=>chooseRetryWorker(task)));
             actions.append($('<button type="button" class="menu_button danger">')
                 .text(isFailed || isDone?'删除记录':'取消并删除')
                 .on('click',()=>operateTasks('delete',[task])));
