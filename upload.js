@@ -56,6 +56,7 @@ export async function uploadToNode(file, session, { signal, onProgress = () => {
         const response=await fetchImpl(session,{signal,credentials:'omit'});
         if(!response.ok)throw new Error('上传会话已失效，请重新开始。');
         const data=await response.json();
+        if(data.status==='paused'||data.status==='pausing')throw Object.assign(Error('上传已由任务管理暂停。'),{code:'PAUSED'});
         if(!Number.isSafeInteger(data.offset)||data.offset<0||data.offset>file.size)throw new Error('上传节点返回无效进度。');
         return data.offset;
     }

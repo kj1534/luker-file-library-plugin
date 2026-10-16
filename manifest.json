@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Video Toolkit contributors",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "homePage": "https://github.com/kj1534/luker-file-library-plugin",
   "auto_update": true
 }

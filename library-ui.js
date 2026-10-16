@@ -1,8 +1,9 @@
 import {fileInfo} from './media.js';
-import {uploadResumable,uploadToNode,fileFingerprint} from './upload.js';
+import {fileFingerprint} from './upload.js';
+import {createUploadManager} from './upload-manager.js';
 
 export const taskStatusLabels={queued:'排队中',resolving:'解析中',connecting:'连接源站',downloading:'下载中',processing:'校验 / 合并中',
-    receiving:'接收上传',ready:'等待上传',running:'上传 GCS 中',publishing:'保存至文件库',retrying:'断线重试中',pausing:'正在暂停',paused:'已暂停',
+    receiving:'接收上传',hashing:'计算内容指纹',background:'后台保存中',ready:'等待上传',running:'上传 GCS 中',publishing:'保存至文件库',retrying:'断线重试中',pausing:'正在暂停',paused:'已暂停',
     complete:'已完成',failed:'失败',cancelled:'已取消',expired:'已过期',disconnected:'节点暂不可用'};
 
 export function importSources(value) {
@@ -61,9 +62,8 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     config = await (await fetch(`${API}/config`, { headers: context().getRequestHeaders() })).json();
     const storeKey = `gcs-video-upload:${config.user}`;
     const panel = $('<div class="gcs-video-manager">');
-    const fileInput = $('<input type="file" class="gcs-file-input">');
+    const fileInput = $('<input type="file" multiple class="gcs-file-input">');
     const duration = $('<input type="number" class="text_pole" min="0.1" step="any" placeholder="视频时长（秒）">');
-    const progress = $('<progress max="100" value="0" aria-label="上传进度">').hide();
     const status = $('<div role="status" class="gcs-status">');
     const uploadMode = $('<select class="text_pole" aria-label="上传保存方式">');
     function refreshUploadModes() {
@@ -84,9 +84,33 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
         uploadPlan.text(plan);
     }
     uploadMode.on('change',describeUpload);
-    const upload = $('<button type="button" class="menu_button gcs-primary">').text('开始 / 继续上传');
-    const pause = $('<button type="button" class="menu_button">').text('暂停传输').prop('disabled', true);
-    const fresh = $('<button type="button" class="menu_button gcs-subtle">').text('重置上传进度');
+    const upload = $('<button type="button" class="menu_button gcs-primary">').text('加入上传队列 / 关联续传文件');
+    const uploadRows=$('<div class="gcs-task-cards" aria-label="上传队列">');
+    const uploadCount=$('<p class="gcs-muted">');
+    const uploadConcurrency=$('<select class="text_pole" aria-label="浏览器上传并发">');
+    for(const n of [1,2,4,8])uploadConcurrency.append($('<option>').val(n).text(`${n} 个并发`));uploadConcurrency.val('4');
+    const uploadSelection=new Set();
+    let uploads;
+    function renderUploads(records){
+        uploadRows.empty();uploadCount.text(`共 ${records.length} 项 · 上传并发 ${uploadConcurrency.val()} · 服务端任务继续在“任务”页显示`+(uploads?.persistenceError?' · '+uploads.persistenceError:''));
+        for(const record of records){
+            const row=$('<article class="gcs-task-row">');
+            const check=$('<input type="checkbox" class="gcs-task-select" aria-label="选择上传">').prop('checked',uploadSelection.has(record.id)).on('change',function(){this.checked?uploadSelection.add(record.id):uploadSelection.delete(record.id);});
+            const info=$('<div class="gcs-task-info">').append($('<strong class="gcs-task-title">').text(record.filename||record.title),$('<div class="gcs-video-meta">').text(`${taskStatusLabels[record.status]||record.status} · ${record.mode} ${record.error||''}`));
+            if(record.status==='hashing')info.append($('<progress aria-label="指纹计算进度">').attr('max',record.total).val(record.hash_done||0));
+            else taskProgress(info,record);
+            if(['paused','failed'].includes(record.status)&&!uploads?.hasFile(record.id)&&!record.transferred)info.append($('<small>').text('请重新选择原文件关联续传。'));
+            const actions=$('<div class="gcs-actions gcs-task-actions">');
+            for(const [op,label] of ([['queued','hashing','receiving','running','publishing','background'].includes(record.status)?['pause','暂停']:['paused','failed'].includes(record.status)?['resume',record.status==='failed'?'重试 / 续传':'继续']:null,['delete','删除记录']].filter(Boolean)))actions.append($('<button type="button" class="menu_button">').text(label).on('click',()=>uploadAction(record.id,op)));
+            row.append(check,info,actions);uploadRows.append(row);
+        }
+    }
+    async function uploadAction(id,op){try{await uploads.operate(id,op);}catch(error){status.text(error.message);}}
+    uploads=createUploadManager({api,key:`gcs-upload-queue:${config.user}`,onChange:renderUploads});
+    renderUploads(uploads.records);
+    uploadConcurrency.on('change',()=>{uploads.setConcurrency(Number(uploadConcurrency.val()));renderUploads(uploads.records);});
+    const uploadTools=$('<div class="gcs-task-tools">').append($('<label class="gcs-checkbox">').append($('<input type="checkbox" aria-label="选择所有上传">').on('change',function(){uploadSelection.clear();if(this.checked)for(const record of uploads.records)uploadSelection.add(record.id);renderUploads(uploads.records);}), ' 全选'),uploadConcurrency);
+    for(const [op,label] of [['pause','暂停所选'],['resume','继续 / 重试所选'],['delete','删除所选']])uploadTools.append($('<button type="button" class="menu_button">').text(label).on('click',async()=>{for(const id of [...uploadSelection])await uploadAction(id,op);}));
     const list = $('<div class="gcs-video-list" aria-label="文件列表">');
     const importUrl = $('<textarea rows="3" class="text_pole" aria-label="导入链接" placeholder="粘贴媒体链接，每行一个（支持 B站 / YouTube / Iwara / 文件直链）">');
     const importWorker = $('<select class="text_pole" aria-label="负责解析下载的节点">');
@@ -99,8 +123,6 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     let polling = true;
     const more = $('<button type="button" class="menu_button">').text('加载更多').hide();
     let nextPage = '';
-    let controller;
-    let active = false;
     let selectedFile;
     function loadSaved() { try { const saved=JSON.parse(sessionStorage.getItem(storeKey));return saved?{...saved,mode:saved.mode || 'gcs'}:null; } catch { return null; } }
     describeUpload();
@@ -390,45 +412,12 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
             element.src = url;
         }
     });
-    pause.on('click', () => controller?.abort());
-    fresh.on('click', () => { if (!active) { sessionStorage.removeItem(storeKey); progress.val(0); status.text('下一次上传会创建新的续传会话。'); } });
     upload.on('click', async () => {
-        if (active) return;
-        if (!selectedFile) { toastr.warning('请先选择文件。'); return; }
-        if (selectedFile.size > config.max_upload_bytes) { toastr.error('文件超过 2 GiB 上传上限。'); return; }
-        controller = new AbortController();
-        active = true; progress.show();uploadMode.prop('disabled',true);
-        upload.prop('disabled', true); pause.prop('disabled', false); fresh.prop('disabled', true); fileInput.prop('disabled', true);
         try {
-            let saved = loadSaved();
-            const mode=uploadMode.val();
-            if (saved?.fingerprint !== fileFingerprint(selectedFile) || saved.mode!==mode) {
-                const response = await fetch(`${API}/${mode==='gcs'?'uploads':'local-uploads'}`, { method: 'POST', headers: context().getRequestHeaders(), body: JSON.stringify({ mode, filename: selectedFile.name, size: selectedFile.size, duration_seconds: duration.val() ? Number(duration.val()) : null }), signal: controller.signal });
-                saved = await response.json();
-                if (!response.ok) throw new Error(saved.error || '创建上传失败。');
-                saved.mode=mode;
-                saved.fingerprint = fileFingerprint(selectedFile);
-                sessionStorage.setItem(storeKey, JSON.stringify(saved));
-            }
-            await (mode==='gcs'?uploadResumable:uploadToNode)(selectedFile, saved.session, { signal: controller.signal, onProgress: (done, total) => {
-                progress.val(done / total * 100);
-                status.text(`已上传 ${(done / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MiB（${Math.floor(done / total * 100)}%）`);
-            } });
-            if(mode!=='gcs') {
-                status.text('浏览器上传完成，节点正在保存文件；如需 GCS 副本，将由节点继续上传。');
-                const task=await api('/local-uploads/finish',{id:saved.id});
-                sessionStorage.setItem(importKey,task.job.id);
-                sessionStorage.removeItem(storeKey);
-                pause.prop('disabled',true);
-                const completed=await pollImport(task.job.id,status);
-                if(completed?.status==='complete')status.text(completed.warning || (completed.video?.url?.startsWith('gs://')?'保存完成：节点与 GCS 云端各存一份（通常保留约 7 天）。':'保存完成：文件保存在节点存储（通常保留约 7 天）。'));
-            } else {sessionStorage.removeItem(storeKey);status.text('保存完成：文件保存在 GCS 云端（通常保留约 7 天）。');}
-            await refresh();
-        } catch (error) {
-            status.text(controller.signal.aborted ? '已暂停。点击“上传 / 继续”恢复；刷新后需要重新选择相同文件。' : error.message);
-        } finally {
-            active = false; uploadMode.prop('disabled',false);upload.prop('disabled', false); pause.prop('disabled', true); fresh.prop('disabled', false); fileInput.prop('disabled', false);
-        }
+            const selected=[...fileInput[0].files];if(!selected.length)throw Error('请先选择文件，可一次选择多个。');
+            uploads.add(selected,{mode:uploadMode.val(),duration:selected.length===1&&duration.val()?Number(duration.val()):null,maxBytes:config.max_upload_bytes});
+            fileInput.val('');selectedFile=undefined;status.text('已加入队列；重新关联的旧任务请点击该项“继续”。');
+        }catch(error){status.text(error.message);}
     });
     const refreshButton = $('<button type="button" class="menu_button">').text('刷新列表').on('click', () => refresh().catch(error => toastr.error(error.message)));
     more.on('click', () => refresh(true).catch(error => toastr.error(error.message)));
@@ -518,8 +507,8 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     addTab('upload', '上传文件', $('<section class="gcs-form-panel">').append(
         $('<label class="gcs-field">').append($('<span>').text('选择本机文件'), fileInput),
         $('<label class="gcs-field">').append($('<span>').text('保存方式'),uploadMode),uploadPlan,durationField,
-        $('<div class="gcs-actions">').append(upload, pause, fresh), progress, status,
-        $('<p class="gcs-muted">').text('浏览器上传支持分片续传。关闭面板会暂停当前上传；节点接手后的保存和 GCS 上传会继续执行。')));
+        $('<div class="gcs-actions">').append(upload),status,uploadTools,uploadCount,uploadRows,
+        $('<p class="gcs-muted">').text('支持多文件队列、分片续传和内容去重。刷新后重新选择原文件关联续传；节点接手后关闭页面也继续保存。删除记录不会删除已完成的文件。')));
     addTab('import', '链接导入', $('<section class="gcs-form-panel">').append(
         $('<label class="gcs-field">').append($('<span>').text('文件链接'), importUrl),
         $('<div class="gcs-import-controls">').append($('<label class="gcs-field">').append($('<span>').text('处理节点'), importWorker), importButton), syncLabel, importStatus,
@@ -566,7 +555,13 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
         bulkBusy=true;taskTools.find('button').prop('disabled',true);let failures=0,lastError='';
         try {
             for(const task of targets){
-                try{await api('/tasks/'+encodeURIComponent(task.id)+'/'+operation,options);if(operation==='delete')taskSelection.delete(task.id);}
+                try{
+                    const local=uploads.findServer(task.id);
+                    if(local&&['pause','resume','retry','cancel','delete'].includes(operation))await uploads.operate(local.id,operation==='retry'?'resume':operation);
+                    else if(task.browser_upload&&operation==='resume')throw Error('请到“上传文件”页重新选择原文件关联续传；浏览器不能在未授权时读取本机文件。');
+                    else await api('/tasks/'+encodeURIComponent(task.id)+'/'+operation,options);
+                    if(operation==='delete')taskSelection.delete(task.id);
+                }
                 catch(error){failures++;lastError=error.message;}
             }
             if(failures)toastr.error(`${failures} 项操作未成功：${lastError}`);
@@ -605,7 +600,7 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
             const mainInfo=$('<div class="gcs-task-info">').append(
                 $('<strong class="gcs-task-title">').text(task.video?.title || task.title || task.id),
                 $('<div class="gcs-video-meta" style="margin-top:4px;">').append(
-                    $('<span class="gcs-storage-label">').text(task.worker_id),
+                    $('<span class="gcs-storage-label">').text(task.worker_id||'浏览器 → GCS'),
                     task.origin==='browser' ? $('<span class="gcs-storage-label">').text('浏览器脚本') : $(''),
                     $(`<span class="gcs-storage-label ${statusClass}">`).text(statusLabel),
                     task.error ? $('<span style="color:#dc2626;">').text(task.error) : $(''),
@@ -617,7 +612,7 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
                 mainInfo.append($('<div class="gcs-task-source">').append($('<span>').text('来源：'),
                     $('<a target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">').attr('href',task.source_url).text(task.source_url),copy,
                     task.source_redacted?$('<small>').text('已隐藏签名参数；重试仍用服务端保存的完整链接。'):$('')));
-            } else if(isFailed)mainInfo.append($('<p class="gcs-muted">').text('旧任务来源尚不可恢复；可尝试原节点重试，或重新提交链接。'));
+            } else if(isFailed)mainInfo.append($('<p class="gcs-muted">').text(task.browser_upload?'浏览器上传：需要时请到“上传文件”重新选择原文件续传。':'旧任务来源尚不可恢复；可尝试原节点重试，或重新提交链接。'));
             if(task.warning)mainInfo.append($('<p class="gcs-muted">').text(task.warning));
             for(const [store,transfer] of Object.entries(task.transfers||{})){
                 const phases={queued:'等待开始',hashing:'计算分块校验',uploading:'写入中',indexing:'登记索引',complete:'完成',failed:'失败',cancelled:'已取消'};
@@ -628,7 +623,7 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
             }
             taskProgress(mainInfo,task);
             const actions=$('<div class="gcs-actions gcs-task-actions">');
-            const ops=isFailed?(task.can_retry===false?[]:['retry']):isDone?[]:[...(task.can_pause?['pause']:[]),...(task.can_resume?['resume']:[]),'cancel'];
+            const ops=isFailed?(task.can_resume?['resume']:task.can_retry===false?[]:['retry']):isDone?[]:[...(task.can_pause?['pause']:[]),...(task.can_resume?['resume']:[]),'cancel'];
             for(const op of ops){
                 const btn=$('<button type="button" class="menu_button">')
                     .toggleClass('danger', op==='cancel')
@@ -650,6 +645,7 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     async function loadTasks(){
         const data=await api('/tasks',undefined,12000);
         taskItems=data.items;
+        uploads.sync(taskItems);
         for(const id of taskSelection)if(!taskItems.some(task=>task.id===id))taskSelection.delete(id);
         renderTasks();taskSync.text(`自动同步开启 · 每 2 秒 · 上次更新 ${new Date().toLocaleTimeString()}`);
     }
@@ -659,7 +655,7 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     taskRefresher=createTaskRefresher({load:loadTasks,isActive:()=>{
         if(panel[0].isConnected)taskWasMounted=true;
         else if(taskWasMounted){stopTasks();return false;}
-        return panel[0].isConnected&&selectedTab==='tasks'&&!document.hidden;
+        return panel[0].isConnected&&['tasks','upload'].includes(selectedTab)&&!document.hidden;
     },onError:error=>taskSync.text(`同步暂时失败，2 秒后重试：${error.message}（任务在服务器继续执行）`)});
     document.addEventListener('visibilitychange',wakeTasks);window.addEventListener('focus',wakeTasks);
     const targetTab = new URLSearchParams(location.search).get('tab') || (config.configured ? 'library' : config.admin ? 'settings' : 'library');
@@ -672,5 +668,5 @@ export async function showLibrary({API, context, Popup, POPUP_TYPE, POPUP_RESULT
     const shown=new Popup(panel, POPUP_TYPE.TEXT, '', { wide: true, large: true, okButton: '关闭' }).show();
     taskRefresher.start();await shown;
     polling = false;clearTimeout(noticeTimer);stopTasks();
-    controller?.abort();
+    uploads.stop();
 }
